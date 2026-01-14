@@ -1,11 +1,10 @@
 import streamlit as st
 import sqlite3
-import time
-import os
 import hmac
 import hashlib
 import secrets
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
 DB_PATH = "messenger.db"
 
@@ -71,7 +70,6 @@ def init_db():
     );
     """)
 
-    # For faster lookups
     cur.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_pair_time ON messages(sender_id, receiver_id, created_at);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_receiver_time ON messages(receiver_id, created_at);")
@@ -139,7 +137,6 @@ def search_users(query: str, exclude_user_id: int, limit: int = 50):
             (exclude_user_id, limit)
         )
     else:
-        # LIKE search
         cur.execute(
             "SELECT id, username FROM users WHERE id != ? AND username LIKE ? ORDER BY username LIMIT ?",
             (exclude_user_id, f"%{q}%", limit)
@@ -166,9 +163,6 @@ def send_message(sender_id: int, receiver_id: int, body: str) -> tuple[bool, str
     return True, "Отправлено."
 
 def get_conversation(user_a: int, user_b: int, limit: int = 200):
-    """
-    Returns messages between user_a and user_b ordered by time ASC, last `limit`.
-    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -189,9 +183,6 @@ def get_conversation(user_a: int, user_b: int, limit: int = 200):
     } for r in rows]
 
 def inbox_preview(user_id: int, limit: int = 20):
-    """
-    Show last messages received for quick preview (optional).
-    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -207,14 +198,18 @@ def inbox_preview(user_id: int, limit: int = 20):
     return [{"from_id": r[0], "from_username": r[1], "body": r[2], "created_at": r[3]} for r in rows]
 
 # -------------------------
-# UI helpers
+# State + UI helpers
 # -------------------------
 def ensure_state():
-    st.session_state.setdefault("user", None)             # dict {id, username}
-    st.session_state.setdefault("chat_with_id", None)     # int
+    st.session_state.setdefault("user", None)
+    st.session_state.setdefault("chat_with_id", None)
     st.session_state.setdefault("user_search", "")
     st.session_state.setdefault("compose_text", "")
-    st.session_state.setdefault("refresh_tick", 0)
+
+    # Автообновление
+    st.session_state.setdefault("autorefresh_enabled", True)
+    st.session_state.setdefault("autorefresh_ms", 1500)          # частота обновления
+    st.session_state.setdefault("pause_refresh_while_typing", True)
 
 def logout():
     st.session_state.user = None
@@ -229,26 +224,19 @@ def header():
 
 def auth_screen():
     st.subheader("Вход / Регистрация")
-
     tab_login, tab_register = st.tabs(["Вход", "Регистрация"])
 
     with tab_login:
         username = st.text_input("Логин", key="login_username")
         password = st.text_input("Пароль", type="password", key="login_password")
-
-        c1, c2 = st.columns([1, 3])
-        with c1:
-            if st.button("Войти", type="primary"):
-                user = authenticate(username, password)
-                if user:
-                    st.session_state.user = user
-                    st.success("Вход выполнен.")
-                    st.rerun()
-                else:
-                    st.error("Неверный логин или пароль.")
-
-        with c2:
-            st.caption("Если это первый раз — создай аккаунт во вкладке “Регистрация”.")
+        if st.button("Войти", type="primary"):
+            user = authenticate(username, password)
+            if user:
+                st.session_state.user = user
+                st.success("Вход выполнен.")
+                st.rerun()
+            else:
+                st.error("Неверный логин или пароль.")
 
     with tab_register:
         new_username = st.text_input("Новый логин", key="reg_username")
@@ -265,22 +253,54 @@ def auth_screen():
                 else:
                     st.error(msg)
 
+def maybe_autorefresh():
+    """
+    Автообновление без кнопки.
+    Важно: когда пользователь печатает сообщение, частые rerun могут мешать набору.
+    Поэтому по умолчанию: если текст не пустой — пауза.
+    """
+    if not st.session_state.autorefresh_enabled:
+        return
+
+    if st.session_state.pause_refresh_while_typing and st.session_state.compose_text.strip():
+        return
+
+    # Это вызывает rerun каждые N мс
+    st_autorefresh(interval=st.session_state.autorefresh_ms, key="chat_autorefresh")
+
 def messenger_screen():
     user = st.session_state.user
     assert user is not None
+
+    # Запускаем автообновление на странице мессенджера
+    maybe_autorefresh()
 
     col_left, col_right = st.columns([1.1, 2.2], gap="large")
 
     with col_left:
         st.markdown(f"### 👤 {user['username']}")
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            if st.button("Обновить"):
-                st.session_state.refresh_tick += 1
-                st.rerun()
-        with c2:
-            if st.button("Выйти"):
-                logout()
+        if st.button("Выйти"):
+            logout()
+
+        st.divider()
+
+        # Настройки автообновления (кнопки "обновить" больше нет)
+        st.markdown("#### ⚙️ Автообновление")
+        st.session_state.autorefresh_enabled = st.toggle(
+            "Автообновление включено",
+            value=st.session_state.autorefresh_enabled
+        )
+        st.session_state.pause_refresh_while_typing = st.toggle(
+            "Пауза, когда печатаю",
+            value=st.session_state.pause_refresh_while_typing
+        )
+        st.session_state.autorefresh_ms = st.slider(
+            "Частота (мс)",
+            min_value=800,
+            max_value=5000,
+            value=st.session_state.autorefresh_ms,
+            step=100
+        )
 
         st.divider()
 
@@ -299,7 +319,6 @@ def messenger_screen():
         else:
             st.caption("Нажми на пользователя, чтобы открыть чат.")
             for u in users:
-                # highlight selected chat
                 is_selected = (st.session_state.chat_with_id == u["id"])
                 btn_label = f"➡️ {u['username']}" if not is_selected else f"✅ {u['username']}"
                 if st.button(btn_label, key=f"user_pick_{u['id']}"):
@@ -336,23 +355,18 @@ def messenger_screen():
 
         st.markdown(f"### 💬 Чат с **{other['username']}**")
 
-        # Conversation
         msgs = get_conversation(user["id"], other["id"], limit=200)
 
         st.markdown("---")
-        chat_box = st.container()
-
-        with chat_box:
+        with st.container():
             if not msgs:
                 st.caption("Сообщений пока нет. Напиши первым(ой).")
             else:
                 for m in msgs:
                     sender_is_me = (m["sender_id"] == user["id"])
                     ts = m["created_at"].replace("T", " ")[:19]
-                    align = "right" if sender_is_me else "left"
                     name = "Вы" if sender_is_me else other["username"]
 
-                    # Simple chat bubble
                     if sender_is_me:
                         st.markdown(
                             f"""
@@ -380,7 +394,6 @@ def messenger_screen():
 
         st.markdown("---")
 
-        # Compose
         st.session_state.compose_text = st.text_area(
             "Сообщение",
             value=st.session_state.compose_text,
@@ -388,7 +401,8 @@ def messenger_screen():
             height=120,
             label_visibility="collapsed"
         )
-        c1, c2, c3 = st.columns([1, 1, 4])
+
+        c1, c2 = st.columns([1, 4])
         with c1:
             if st.button("Отправить", type="primary"):
                 ok, msg = send_message(user["id"], other["id"], st.session_state.compose_text)
@@ -398,11 +412,7 @@ def messenger_screen():
                 else:
                     st.error(msg)
         with c2:
-            if st.button("Очистить"):
-                st.session_state.compose_text = ""
-                st.rerun()
-        with c3:
-            st.caption("Подсказка: нажми «Обновить» слева, чтобы быстро подтянуть новые сообщения (MVP без realtime).")
+            st.caption("Сообщения обновляются автоматически.")
 
 # -------------------------
 # App
