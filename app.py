@@ -208,7 +208,7 @@ def ensure_state():
 
     # Автообновление
     st.session_state.setdefault("autorefresh_enabled", True)
-    st.session_state.setdefault("autorefresh_ms", 1500)          # частота обновления
+    st.session_state.setdefault("autorefresh_ms", 1500)
     st.session_state.setdefault("pause_refresh_while_typing", True)
 
 def logout():
@@ -254,25 +254,16 @@ def auth_screen():
                     st.error(msg)
 
 def maybe_autorefresh():
-    """
-    Автообновление без кнопки.
-    Важно: когда пользователь печатает сообщение, частые rerun могут мешать набору.
-    Поэтому по умолчанию: если текст не пустой — пауза.
-    """
     if not st.session_state.autorefresh_enabled:
         return
-
     if st.session_state.pause_refresh_while_typing and st.session_state.compose_text.strip():
         return
-
-    # Это вызывает rerun каждые N мс
     st_autorefresh(interval=st.session_state.autorefresh_ms, key="chat_autorefresh")
 
 def messenger_screen():
     user = st.session_state.user
     assert user is not None
 
-    # Запускаем автообновление на странице мессенджера
     maybe_autorefresh()
 
     col_left, col_right = st.columns([1.1, 2.2], gap="large")
@@ -284,7 +275,6 @@ def messenger_screen():
 
         st.divider()
 
-        # Настройки автообновления (кнопки "обновить" больше нет)
         st.markdown("#### ⚙️ Автообновление")
         st.session_state.autorefresh_enabled = st.toggle(
             "Автообновление включено",
@@ -329,14 +319,20 @@ def messenger_screen():
         st.divider()
         st.markdown("#### 📥 Последние входящие")
         previews = inbox_preview(user["id"], limit=10)
+
         if not previews:
             st.caption("Пока нет входящих сообщений.")
         else:
-            for p in previews:
+            for i, p in enumerate(previews):
                 ts = p["created_at"].replace("T", " ")[:19]
                 st.write(f"**{p['from_username']}** · {ts}")
                 st.caption(p["body"][:120] + ("…" if len(p["body"]) > 120 else ""))
-                if st.button(f"Открыть чат с {p['from_username']}", key=f"open_from_{p['from_id']}"):
+
+                # FIX: уникальный key, даже если много сообщений от одного отправителя
+                if st.button(
+                    f"Открыть чат с {p['from_username']}",
+                    key=f"open_from_{p['from_id']}_{i}_{p['created_at']}"
+                ):
                     st.session_state.chat_with_id = p["from_id"]
                     st.session_state.compose_text = ""
                     st.rerun()
@@ -414,9 +410,6 @@ def messenger_screen():
         with c2:
             st.caption("Сообщения обновляются автоматически.")
 
-# -------------------------
-# App
-# -------------------------
 def main():
     st.set_page_config(page_title="Streamlit Messenger", page_icon="💬", layout="wide")
     init_db()
